@@ -1,0 +1,7 @@
+Fluent GCP has been successfully deployed
+
+Some information about customization can be found here:
+https://cloud.google.com/solutions/customizing-stackdriver-logs-fluentd
+
+Sources can be found here:
+https://github.com/kubernetes/kubernetes/tree/master/cluster/addons/fluentd-gcp

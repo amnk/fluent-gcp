@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ template "fluent-gcp.fullname" . }}
+  labels:
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    app: {{ template "fluent-gcp.name" . }}
+    heritage: {{ .Release.Service }}
+    release: {{ .Release.Name }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ template "fluent-gcp.name" . }}
+      component: "{{ .Values.name }}"
+      release: {{ .Release.Name }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: {{ template "fluent-gcp.name" . }}
+        component: "{{ .Values.name }}"
+        release: {{ .Release.Name }}
+      # This annotation ensures that fluentd does not get evicted if the node
+      # supports critical pod annotation based priority scheme.
+      # Note that this does not guarantee admission on the nodes (#40573).
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ''
+    spec:
+      dnsPolicy: Default
+      containers:
+      - name: fluentd-gcp
+        hostNetwork: true
+        image: {{ .Values.image.name }}:{{ .Values.image.tag }}
+        # If fluentd consumes its own logs, the following situation may happen:
+        # fluentd fails to send a chunk to the server => writes it to the log =>
+        # tries to send this message to the server => fails to send a chunk and so on.
+        # Writing to a file, which is not exported to the back-end prevents it.
+        # It also allows to increase the fluentd verbosity by default.
+        env:
+        - name: FLUENTD_ARGS
+          value: --no-supervisor
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        - name: STACKDRIVER_METADATA_AGENT_URL
+          value: http://$(NODE_NAME):8799
+        resources:
+{{ toYaml .Values.resources | indent 10 }}
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: libsystemddir
+          mountPath: /host/lib
+          readOnly: true
+        - name: config-volume
+          mountPath: /etc/google-fluentd/config.d
+        - name: config-volume-google
+          mountPath: /etc/google-fluentd/google-fluentd.conf
+          subPath: google-fluentd.conf
+        {{- if (.Values.customAuth.enabled) }}
+        - name: application-default-credentials
+          mountPath: /etc/google/auth/
+          readOnly: true
+        {{- end }}
+        # Liveness probe is aimed to help in situations where fluentd
+        # silently hangs for no apparent reasons until manual restart.
+        # The idea of this probe is that if fluentd is not queueing or
+        # flushing chunks for 5 minutes, something is not right. If
+        # you want to change the fluentd configuration, reducing amount of
+        # logs fluentd collects, consider changing the threshold or turning
+        # liveness probe off completely.
+        livenessProbe:
+          initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+          exec:
+            command:
+            - '/bin/sh'
+            - '-c'
+            - >
+              LIVENESS_THRESHOLD_SECONDS=${LIVENESS_THRESHOLD_SECONDS:-300};
+              STUCK_THRESHOLD_SECONDS=${LIVENESS_THRESHOLD_SECONDS:-900};
+              if [ ! -e /var/log/fluentd-buffers ];
+              then
+                exit 1;
+              fi;
+              LAST_MODIFIED_DATE=`stat /var/log/fluentd-buffers | grep Modify | sed -r "s/Modify: (.*)/\1/"`;
+              LAST_MODIFIED_TIMESTAMP=`date -d "$LAST_MODIFIED_DATE" +%s`;
+              if [ `date +%s` -gt `expr $LAST_MODIFIED_TIMESTAMP + $STUCK_THRESHOLD_SECONDS` ];
+              then
+                rm -rf /var/log/fluentd-buffers;
+                exit 1;
+              fi;
+              if [ `date +%s` -gt `expr $LAST_MODIFIED_TIMESTAMP + $LIVENESS_THRESHOLD_SECONDS` ];
+              then
+                exit 1;
+              fi;
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: libsystemddir
+        hostPath:
+          path: /usr/lib64
+      - name: config-volume
+        configMap:
+          name: {{ template "fluent-gcp.fullname" . }}-config
+          items:
+            - key: containers.input.conf
+              path: containers.input.conf
+            - key: system.input.conf
+              path: system.input.conf
+            - key: monitoring.conf
+              path: monitoring.conf
+            - key: output.conf
+              path: output.conf
+      - name: config-volume-google
+        configMap:
+          name: {{ template "fluent-gcp.fullname" . }}-config
+          items:
+            - key: google-fluentd.conf
+              path: google-fluentd.conf
+      {{- if (.Values.customAuth.enabled) }}
+      - name: application-default-credentials
+        secret:
+          secretName: {{ template "fluent-gcp.fullname" . }}-secret
+      {{- end }}
+
